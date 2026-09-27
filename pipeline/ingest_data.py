@@ -1,22 +1,10 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+import click
 import pandas as pd
 from sqlalchemy import create_engine
 from tqdm.auto import tqdm
-
-# --- Settings -----------------------------------------------------
-
-PG_USER = 'root'
-PG_PASS = 'root'
-PG_HOST = 'localhost'
-PG_PORT = 5432
-PG_DB = 'ny_taxi'
-
-YEAR = 2021
-MONTH = 1
-TARGET_TABLE = 'yellow_taxi_data'
-CHUNKSIZE = 100_000
 
 dtype = {
     "VendorID": "Int64",
@@ -34,42 +22,68 @@ dtype = {
     "tolls_amount": "float64",
     "improvement_surcharge": "float64",
     "total_amount": "float64",
-    "congestion_surcharge": "float64",
+    "congestion_surcharge": "float64"
 }
 
 parse_dates = [
     "tpep_pickup_datetime",
-    "tpep_dropoff_datetime",
+    "tpep_dropoff_datetime"
 ]
 
+ZONE_LOOKUP_URL = 'https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv'
 
-def run():
+
+@click.command()
+@click.option('--pg-user', default='root', help='PostgreSQL user')
+@click.option('--pg-pass', default='root', help='PostgreSQL password')
+@click.option('--pg-host', default='localhost', help='PostgreSQL host')
+@click.option('--pg-port', default=5432, type=int, help='PostgreSQL port')
+@click.option('--pg-db', default='ny_taxi', help='PostgreSQL database name')
+@click.option('--year', default=2021, type=int, help='Year of the data')
+@click.option('--month', default=1, type=int, help='Month of the data')
+@click.option('--target-table', default='yellow_taxi_data', help='Target table name')
+@click.option('--chunksize', default=100000, type=int, help='Chunk size for reading CSV')
+@click.option('--zone-table', default='taxi_zone_lookup', help='Target table name for the zone lookup CSV')
+@click.option('--skip-zones', is_flag=True, default=False, help='Skip ingesting the zone lookup table')
+def run(pg_user, pg_pass, pg_host, pg_port, pg_db, year, month, target_table, chunksize, zone_table, skip_zones):
+    """Ingest NYC taxi data into PostgreSQL database."""
     prefix = 'https://github.com/DataTalksClub/nyc-tlc-data/releases/download/yellow'
-    url = f'{prefix}/yellow_tripdata_{YEAR}-{MONTH:02d}.csv.gz'
+    url = f'{prefix}/yellow_tripdata_{year}-{month:02d}.csv.gz'
 
-    engine = create_engine(f'postgresql+psycopg://{PG_USER}:{PG_PASS}@{PG_HOST}:{PG_PORT}/{PG_DB}')
+    engine = create_engine(f'postgresql+psycopg://{pg_user}:{pg_pass}@{pg_host}:{pg_port}/{pg_db}')
 
     df_iter = pd.read_csv(
         url,
         dtype=dtype,
         parse_dates=parse_dates,
         iterator=True,
-        chunksize=CHUNKSIZE,
+        chunksize=chunksize,
     )
 
     first = True
 
-    for df_chunk in tqdm(df_iter, desc=f"Loading {YEAR}-{MONTH:02d}"):
+    for df_chunk in tqdm(df_iter):
+        if first:
+            df_chunk.head(0).to_sql(
+                name=target_table,
+                con=engine,
+                if_exists='replace'
+            )
+            first = False
+
         df_chunk.to_sql(
-            name=TARGET_TABLE,
+            name=target_table,
             con=engine,
-            if_exists='replace' if first else 'append',
-            index=False,
+            if_exists='append'
         )
-        first = False
 
-    print(f"Done loading {url} into '{TARGET_TABLE}'.")
-
+    if not skip_zones:
+        df_zones = pd.read_csv(ZONE_LOOKUP_URL)
+        df_zones.to_sql(
+            name=zone_table,
+            con=engine,
+            if_exists='replace'
+        )
 
 if __name__ == '__main__':
     run()
